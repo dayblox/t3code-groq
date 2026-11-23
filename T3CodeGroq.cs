@@ -6,10 +6,13 @@
 //
 // Usage:
 //   T3Code-Groq.exe                       Patch if server.asar (or app.asar icon/name) changed, then launch T3 Code
+//   T3Code-Groq.exe --help                Show CLI options and usage examples
 //   T3Code-Groq.exe --dry-run             Test patch on a temp copy (never touches install)
 //   T3Code-Groq.exe --patch-only          Patch if needed without launching
 //   T3Code-Groq.exe --restore             Restore server.asar.bak (and app.asar.bak if present)
+//   T3Code-Groq.exe --url <endpoint>      Custom transcription endpoint URL (or base URL without /audio/transcriptions)
 //   T3Code-Groq.exe --model whisper-large-v3
+//   T3Code-Groq.exe --skip-asar           Skip server.asar transcription patching (icon/name branding-only mode)
 //   T3Code-Groq.exe --icon                         Pick an icon (.ico / .exe / .dll / .lnk) via Windows file dialog
 //   T3Code-Groq.exe --icon "C:\path\to\Code.exe"   Patch T3 Code's Alt+Tab / window icon (accepts .ico, .exe, .dll)
 //   T3Code-Groq.exe --name "Visual Studio Code"    Patch T3 Code's shortcut name & Alt+Tab window title
@@ -30,7 +33,7 @@ using System.Windows.Forms;
 
 static class Program
 {
-    const string GroqUrl = "https://api.groq.com/openai/v1/audio/transcriptions";
+    const string DefaultGroqUrl = "https://api.groq.com/openai/v1/audio/transcriptions";
     const string DefaultModel = "whisper-large-v3";
     const string DefaultAumid = "com.t3tools.t3code";
 
@@ -40,12 +43,27 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        bool showHelp = HasAnyFlag(args, "--help", "-h", "/?");
         bool dryRun = HasFlag(args, "--dry-run");
         bool patchOnly = HasFlag(args, "--patch-only");
         bool restore = HasFlag(args, "--restore");
         bool createShortcut = HasFlag(args, "--create-shortcut");
-        bool cliMode = dryRun || patchOnly || restore || createShortcut;
-        if (cliMode) AttachConsole(-1);
+        bool skipAsar = HasAnyFlag(args, "--skip-asar", "--no-asar");
+        bool skipIcon = HasFlag(args, "--skip-icon");
+        bool skipName = HasFlag(args, "--skip-name");
+        bool cliMode = showHelp || dryRun || patchOnly || restore || createShortcut;
+        bool attachedConsole = false;
+        if (cliMode) attachedConsole = AttachConsole(-1);
+
+        if (showHelp)
+        {
+            string helpText = BuildHelpText();
+            if (attachedConsole || Console.IsOutputRedirected)
+                Console.WriteLine(helpText);
+            else
+                MessageBox.Show(helpText, "T3Code-Groq Help", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return 0;
+        }
 
         string model = GetOpt(args, "--model", DefaultModel);
         string installDir = GetOpt(
@@ -75,8 +93,30 @@ static class Program
         TryGetOptValue(args, "--icon", out iconFlagPresent, out iconOpt);
         string nameOpt = GetOpt(args, "--name", null);
 
+        bool urlFlagPresent;
+        string urlOpt;
+        TryGetOptValueAny(args, out urlFlagPresent, out urlOpt, "--url", "--groq-url");
+
         try
         {
+            if (urlFlagPresent && string.IsNullOrWhiteSpace(urlOpt))
+                throw new ArgumentException("Missing value for --url / --groq-url.");
+
+            string rawUrl = !string.IsNullOrWhiteSpace(urlOpt)
+                ? urlOpt
+                : Environment.GetEnvironmentVariable("T3CODE_GROQ_URL");
+            string targetUrl = NormalizeTranscriptionUrl(rawUrl);
+
+            if (skipIcon)
+            {
+                iconFlagPresent = false;
+                iconOpt = null;
+            }
+            if (skipName)
+            {
+                nameOpt = null;
+            }
+
             if (iconFlagPresent && string.IsNullOrEmpty(iconOpt))
             {
                 iconOpt = PickIconFile();
@@ -106,30 +146,40 @@ static class Program
                     && !string.Equals(Path.GetFullPath(iconOpt), Path.GetFullPath(selfExe), StringComparison.OrdinalIgnoreCase)
                     && (!File.Exists(exePath) || !string.Equals(Path.GetFullPath(iconOpt), Path.GetFullPath(exePath), StringComparison.OrdinalIgnoreCase));
 
-                var argParts = new List<string>();
-                if (customWindowIcon) argParts.Add("--icon \"" + iconOpt + "\"");
-                if (!string.IsNullOrEmpty(nameOpt)) argParts.Add("--name \"" + nameOpt.Replace("\"", "\\\"") + "\"");
-                string lnkArgs = argParts.Count > 0 ? string.Join(" ", argParts.ToArray()) : null;
+                string lnkArgs = BuildShortcutArgs(
+                    targetUrl,
+                    model,
+                    skipAsar,
+                    skipIcon,
+                    skipName,
+                    customWindowIcon ? iconOpt : null,
+                    !string.IsNullOrEmpty(nameOpt) ? nameOpt : null);
                 string desc = !string.IsNullOrEmpty(nameOpt) ? nameOpt : defaultAppName;
 
                 CreateMergedShortcut(shortcutPath, selfExe, lnkArgs, iconPath, aumid, desc);
-                if (customWindowIcon)
+                if (!skipIcon)
                 {
-                    Directory.CreateDirectory(stateDir);
-                    File.WriteAllText(iconConfigPath, iconOpt);
+                    if (customWindowIcon)
+                    {
+                        Directory.CreateDirectory(stateDir);
+                        File.WriteAllText(iconConfigPath, iconOpt);
+                    }
+                    else if (File.Exists(iconConfigPath))
+                    {
+                        File.Delete(iconConfigPath);
+                    }
                 }
-                else if (File.Exists(iconConfigPath))
+                if (!skipName)
                 {
-                    File.Delete(iconConfigPath);
-                }
-                if (!string.IsNullOrEmpty(nameOpt))
-                {
-                    Directory.CreateDirectory(stateDir);
-                    File.WriteAllText(nameConfigPath, nameOpt);
-                }
-                else if (File.Exists(nameConfigPath))
-                {
-                    File.Delete(nameConfigPath);
+                    if (!string.IsNullOrEmpty(nameOpt))
+                    {
+                        Directory.CreateDirectory(stateDir);
+                        File.WriteAllText(nameConfigPath, nameOpt);
+                    }
+                    else if (File.Exists(nameConfigPath))
+                    {
+                        File.Delete(nameConfigPath);
+                    }
                 }
                 SyncStartMenuShortcut(
                     stateDir,
@@ -137,6 +187,11 @@ static class Program
                     exePath,
                     customWindowIcon ? iconOpt : null,
                     !string.IsNullOrEmpty(nameOpt) ? nameOpt : null,
+                    targetUrl,
+                    model,
+                    skipAsar,
+                    skipIcon,
+                    skipName,
                     aumid,
                     logPath,
                     cliMode);
@@ -144,75 +199,124 @@ static class Program
                 return 0;
             }
 
-            if (!File.Exists(asarPath))
-                throw new FileNotFoundException("server.asar not found at: " + asarPath);
-
             if (restore)
             {
-                if (!File.Exists(backupPath))
-                    throw new FileNotFoundException("Backup not found at: " + backupPath);
-                File.Copy(backupPath, asarPath, true);
+                bool restoredAny = false;
+                if (File.Exists(backupPath))
+                {
+                    File.Copy(backupPath, asarPath, true);
+                    Log(logPath, cliMode, "Restored original server.asar from server.asar.bak.");
+                    restoredAny = true;
+                }
                 if (File.Exists(appBackupPath))
                 {
                     File.Copy(appBackupPath, appAsarPath, true);
                     Log(logPath, cliMode, "Restored original app.asar from app.asar.bak.");
+                    restoredAny = true;
                 }
-                RestoreStartMenuShortcut(stateDir, logPath, cliMode);
+                if (RestoreStartMenuShortcut(stateDir, logPath, cliMode))
+                    restoredAny = true;
+                if (!restoredAny)
+                    throw new FileNotFoundException("No backups found to restore (checked server.asar.bak, app.asar.bak, and startmenu.lnk.bak).");
                 if (File.Exists(statePath)) File.Delete(statePath);
                 if (File.Exists(iconConfigPath)) File.Delete(iconConfigPath);
                 if (File.Exists(nameConfigPath)) File.Delete(nameConfigPath);
-                Log(logPath, cliMode, "Restored original server.asar from server.asar.bak.");
                 return 0;
             }
 
-            string activeIconPath = iconOpt;
-            if (string.IsNullOrEmpty(activeIconPath) && File.Exists(iconConfigPath))
+            if (!skipAsar && !File.Exists(asarPath))
+                throw new FileNotFoundException("server.asar not found at: " + asarPath);
+
+            string activeIconPath = null;
+            if (!skipIcon)
             {
-                string saved = File.ReadAllText(iconConfigPath).Trim();
-                if (!string.IsNullOrEmpty(saved) && File.Exists(saved))
-                    activeIconPath = saved;
+                activeIconPath = iconOpt;
+                if (string.IsNullOrEmpty(activeIconPath) && File.Exists(iconConfigPath))
+                {
+                    string saved = File.ReadAllText(iconConfigPath).Trim();
+                    if (!string.IsNullOrEmpty(saved) && File.Exists(saved))
+                        activeIconPath = saved;
+                }
             }
 
-            string activeName = nameOpt;
-            if (string.IsNullOrEmpty(activeName) && File.Exists(nameConfigPath))
+            string activeName = null;
+            if (!skipName)
             {
-                string saved = File.ReadAllText(nameConfigPath).Trim();
-                if (!string.IsNullOrEmpty(saved))
-                    activeName = saved;
+                activeName = nameOpt;
+                if (string.IsNullOrEmpty(activeName) && File.Exists(nameConfigPath))
+                {
+                    string saved = File.ReadAllText(nameConfigPath).Trim();
+                    if (!string.IsNullOrEmpty(saved))
+                        activeName = saved;
+                }
             }
+
+            bool shouldPatchAppAsar = File.Exists(appAsarPath)
+                && ((!skipIcon && (!string.IsNullOrEmpty(activeIconPath) || File.Exists(appBackupPath)))
+                    || (!skipName && (!string.IsNullOrEmpty(activeName) || File.Exists(appBackupPath))));
 
             if (dryRun)
             {
-                PatchAsar(asarPath, backupPath, model, true, logPath, cliMode);
-                if (File.Exists(appAsarPath) && (!string.IsNullOrEmpty(activeIconPath) || !string.IsNullOrEmpty(activeName) || File.Exists(appBackupPath)))
+                if (skipAsar)
+                {
+                    Log(logPath, cliMode, "DRY RUN: Skipping server.asar transcription patching (--skip-asar).");
+                }
+                else
+                {
+                    PatchAsar(asarPath, backupPath, targetUrl, model, true, logPath, cliMode);
+                }
+                if (shouldPatchAppAsar)
                 {
                     byte[] icoBytes = !string.IsNullOrEmpty(activeIconPath) ? LoadIconBytes(activeIconPath) : null;
-                    PatchAppAsar(appAsarPath, appBackupPath, icoBytes, activeName, true, logPath, cliMode);
+                    PatchAppAsar(appAsarPath, appBackupPath, icoBytes, activeName, skipIcon, skipName, true, logPath, cliMode);
                 }
                 return 0;
             }
 
-            // Fast path (<20ms): unchanged size + LastWriteTimeUtc + model + icon + name + Start Menu => launch immediately
-            string expectedState = BuildStateKey(asarPath, model, appAsarPath, activeIconPath, activeName, stateDir);
+            // Fast path (<20ms): unchanged size + LastWriteTimeUtc + url + model + icon + name + Start Menu => launch immediately
+            string expectedState = BuildStateKey(asarPath, targetUrl, model, skipAsar, appAsarPath, activeIconPath, activeName, skipIcon, skipName, stateDir);
             if (File.Exists(statePath) && File.ReadAllText(statePath).Trim() == expectedState)
             {
                 if (!patchOnly) Launch(exePath);
                 return 0;
             }
 
-            PatchAsar(asarPath, backupPath, model, false, logPath, cliMode);
-            if (File.Exists(appAsarPath) && (!string.IsNullOrEmpty(activeIconPath) || !string.IsNullOrEmpty(activeName) || File.Exists(appBackupPath)))
+            if (skipAsar)
+            {
+                Log(logPath, cliMode, "Skipping server.asar transcription patching (--skip-asar).");
+            }
+            else
+            {
+                PatchAsar(asarPath, backupPath, targetUrl, model, false, logPath, cliMode);
+            }
+
+            if (shouldPatchAppAsar)
             {
                 byte[] icoBytes = !string.IsNullOrEmpty(activeIconPath) ? LoadIconBytes(activeIconPath) : null;
-                PatchAppAsar(appAsarPath, appBackupPath, icoBytes, activeName, false, logPath, cliMode);
+                PatchAppAsar(appAsarPath, appBackupPath, icoBytes, activeName, skipIcon, skipName, false, logPath, cliMode);
             }
 
             string currentSelfExe = Process.GetCurrentProcess().MainModule.FileName;
             string activeAumid = GetOpt(args, "--aumid", DetectT3Aumid(stateDir) ?? DefaultAumid);
-            SyncStartMenuShortcut(stateDir, currentSelfExe, exePath, activeIconPath, activeName, activeAumid, logPath, cliMode);
+            SyncStartMenuShortcut(
+                stateDir,
+                currentSelfExe,
+                exePath,
+                activeIconPath,
+                activeName,
+                targetUrl,
+                model,
+                skipAsar,
+                skipIcon,
+                skipName,
+                activeAumid,
+                logPath,
+                cliMode);
 
             Directory.CreateDirectory(stateDir);
-            File.WriteAllText(statePath, BuildStateKey(asarPath, model, appAsarPath, activeIconPath, activeName, stateDir));
+            File.WriteAllText(
+                statePath,
+                BuildStateKey(asarPath, targetUrl, model, skipAsar, appAsarPath, activeIconPath, activeName, skipIcon, skipName, stateDir));
 
             if (!patchOnly) Launch(exePath);
             return 0;
@@ -226,6 +330,136 @@ static class Program
             if (!cliMode)
                 MessageBox.Show(msg, "T3 Code (Groq)", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return 1;
+        }
+    }
+
+    static string BuildHelpText()
+    {
+        return string.Join(Environment.NewLine, new[]
+        {
+            "T3Code-Groq - On-launch Groq Whisper patcher & branding launcher for T3 Code (Windows)",
+            "",
+            "Usage:",
+            "  T3Code-Groq.exe [options]",
+            "",
+            "Options:",
+            "  --url, --groq-url <url>  Custom transcription endpoint URL (default: " + DefaultGroqUrl + ")",
+            "                           Also reads T3CODE_GROQ_URL. Trailing slashes are trimmed and",
+            "                           /audio/transcriptions is appended automatically if omitted.",
+            "  --model <id>             Groq Whisper model (default: " + DefaultModel + ")",
+            "  --skip-asar, --no-asar   Skip server.asar transcription patching (icon/name branding-only mode)",
+            "  --skip-icon              Skip custom icon patching and shortcut icon override",
+            "  --skip-name              Skip custom window title and shortcut name override",
+            "  --icon [path]            Override window, Alt+Tab, Taskbar, and Start icon (.ico, .exe, .dll).",
+            "                           Omit path to open a Windows file picker.",
+            "  --name \"<title>\"         Override shortcut name, Start Menu name, and Alt+Tab / window title",
+            "  --create-shortcut        Create a merged Desktop shortcut and sync the Start Menu shortcut",
+            "  --shortcut <path>        Custom .lnk output path for --create-shortcut",
+            "  --aumid <id>             Override AppUserModelID for shortcut taskbar merging",
+            "  --dry-run                Verify patching and ASAR integrity on a temp copy without modifying install",
+            "  --patch-only             Patch if needed without launching T3 Code",
+            "  --restore                Restore original server.asar, app.asar, and Start Menu shortcut from backups",
+            "  --install-dir <dir>      Custom T3 Code install directory (default: %LOCALAPPDATA%\\Programs\\t3code",
+            "                           or T3CODE_INSTALL_DIR)",
+            "  -h, --help               Show this help message",
+            "",
+            "Examples:",
+            "  Standard run (default official Groq URL + optional branding):",
+            "    T3Code-Groq.exe --create-shortcut --icon --name \"My Editor\"",
+            "",
+            "  Custom proxy URL run (full URL or base URL):",
+            "    T3Code-Groq.exe --url https://<your-worker>.<your-subdomain>.workers.dev/openai/v1/audio/transcriptions",
+            "    T3Code-Groq.exe --url https://<your-worker>.<your-subdomain>.workers.dev/openai/v1",
+            "",
+            "  Branding-only run (skip server.asar transcription patch, patch icon/name only):",
+            "    T3Code-Groq.exe --skip-asar --icon \"C:\\path\\to\\icon.ico\" --name \"My Editor\""
+        });
+    }
+
+    static string NormalizeTranscriptionUrl(string rawUrl)
+    {
+        if (string.IsNullOrWhiteSpace(rawUrl))
+            return DefaultGroqUrl;
+
+        string trimmed = rawUrl.Trim().TrimEnd('/');
+        Uri parsed;
+        if (!Uri.TryCreate(trimmed, UriKind.Absolute, out parsed)
+            || (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new ArgumentException("Invalid transcription URL (must be an absolute http:// or https:// URL): " + rawUrl);
+        }
+
+        if (string.IsNullOrEmpty(parsed.Query))
+        {
+            if (!trimmed.EndsWith("/audio/transcriptions", StringComparison.OrdinalIgnoreCase))
+                trimmed += "/audio/transcriptions";
+            return trimmed;
+        }
+
+        string pathNoTrailing = parsed.AbsolutePath.TrimEnd('/');
+        if (!pathNoTrailing.EndsWith("/audio/transcriptions", StringComparison.OrdinalIgnoreCase))
+        {
+            var builder = new UriBuilder(parsed);
+            builder.Path = pathNoTrailing + "/audio/transcriptions";
+            return builder.Uri.AbsoluteUri;
+        }
+        return trimmed;
+    }
+
+    static string BuildShortcutArgs(
+        string targetUrl,
+        string model,
+        bool skipAsar,
+        bool skipIcon,
+        bool skipName,
+        string iconPath,
+        string customName)
+    {
+        var argParts = new List<string>();
+        if (skipAsar)
+        {
+            argParts.Add("--skip-asar");
+        }
+        else
+        {
+            if (!string.IsNullOrEmpty(targetUrl) && !string.Equals(targetUrl, DefaultGroqUrl, StringComparison.OrdinalIgnoreCase))
+                argParts.Add("--url \"" + targetUrl.Replace("\"", "\\\"") + "\"");
+            if (!string.IsNullOrEmpty(model) && !string.Equals(model, DefaultModel, StringComparison.Ordinal))
+                argParts.Add("--model \"" + model.Replace("\"", "\\\"") + "\"");
+        }
+        if (skipIcon)
+            argParts.Add("--skip-icon");
+        else if (!string.IsNullOrEmpty(iconPath))
+            argParts.Add("--icon \"" + iconPath + "\"");
+        if (skipName)
+            argParts.Add("--skip-name");
+        else if (!string.IsNullOrEmpty(customName))
+            argParts.Add("--name \"" + customName.Replace("\"", "\\\"") + "\"");
+        return argParts.Count > 0 ? string.Join(" ", argParts.ToArray()) : null;
+    }
+
+    static bool HasAnyFlag(string[] args, params string[] flags)
+    {
+        for (int i = 0; i < flags.Length; i++)
+            if (HasFlag(args, flags[i])) return true;
+        return false;
+    }
+
+    static void TryGetOptValueAny(string[] args, out bool present, out string value, params string[] names)
+    {
+        present = false;
+        value = null;
+        for (int n = 0; n < names.Length; n++)
+        {
+            bool p;
+            string v;
+            TryGetOptValue(args, names[n], out p, out v);
+            if (p)
+            {
+                present = true;
+                value = v;
+                return;
+            }
         }
     }
 
@@ -363,23 +597,32 @@ static class Program
         return cur.TryGetValue("files", out finalFiles) ? finalFiles as Dictionary<string, object> : null;
     }
 
-    static string PatchCloudSpeechSource(string text, string model, out bool changed)
+    static string PatchCloudSpeechSource(string text, string targetUrl, string model, out bool changed)
     {
-        if (text.Contains(GroqUrl) && text.Contains("model: \"" + model + "\""))
-        {
-            changed = false;
-            return text;
-        }
+        var patchedEndpointRe = new Regex(
+            @"(openai:\s*\{\s*url:\s*"")([^""]+)("",\s*model:\s*"")([^""]+)(""\s*\})");
+        bool alreadyGroqPatched = text.Contains("const __groqWords =")
+            || (!text.Contains("api.openai.com/v1/audio/transcriptions") && patchedEndpointRe.IsMatch(text));
 
-        // If already patched for another Groq model, just swap the model string
-        if (text.Contains(GroqUrl))
+        // If already patched for Groq (official or custom proxy URL), update URL and/or model if needed
+        if (alreadyGroqPatched)
         {
-            var groqModelRe = new Regex(
-                @"(openai:\s*\{\s*url:\s*""" + Regex.Escape(GroqUrl) + @""",\s*model:\s*"")[^""]+(""\s*\})");
-            if (!groqModelRe.IsMatch(text))
-                throw new Exception("Patch failed: could not match existing Groq model block.");
+            Match m = patchedEndpointRe.Match(text);
+            if (!m.Success)
+                throw new Exception("Patch failed: could not match existing Groq endpoint/model block.");
+            if (m.Groups[2].Value == targetUrl && m.Groups[4].Value == model)
+            {
+                changed = false;
+                return text;
+            }
             changed = true;
-            return groqModelRe.Replace(text, "$1" + model + "$2", 1);
+            return patchedEndpointRe.Replace(
+                text,
+                delegate(Match match)
+                {
+                    return match.Groups[1].Value + targetUrl + match.Groups[3].Value + model + match.Groups[5].Value;
+                },
+                1);
         }
 
         string patched = text;
@@ -389,7 +632,13 @@ static class Program
             @"(openai:\s*\{\s*url:\s*)""https://api\.openai\.com/v1/audio/transcriptions""(,\s*model:\s*)""gpt-transcribe""(\s*\})");
         if (!endpointRe.IsMatch(patched))
             throw new Exception("Patch failed: could not match OpenAI endpoint/model block.");
-        patched = endpointRe.Replace(patched, "$1\"" + GroqUrl + "\"$2\"" + model + "\"$3", 1);
+        patched = endpointRe.Replace(
+            patched,
+            delegate(Match match)
+            {
+                return match.Groups[1].Value + "\"" + targetUrl + "\"" + match.Groups[2].Value + "\"" + model + "\"" + match.Groups[3].Value;
+            },
+            1);
 
         // 2. Language field (`languages[]` -> `language`)
         var langRe = new Regex(
@@ -463,7 +712,7 @@ static class Program
         }
     }
 
-    static void PatchAsar(string asarPath, string backupPath, string model, bool dryRun, string logPath, bool cliMode)
+    static void PatchAsar(string asarPath, string backupPath, string targetUrl, string model, bool dryRun, string logPath, bool cliMode)
     {
         string outPath = dryRun
             ? Path.Combine(Path.GetTempPath(), "server-groq-dryrun-" + DateTime.UtcNow.Ticks + ".asar")
@@ -472,7 +721,7 @@ static class Program
         string targetName = null;
         int oldSize = 0;
         int newSize = 0;
-        bool wasAlreadyGroq = false;
+        bool wasAlreadyPatched = false;
 
         using (var src = new FileStream(asarPath, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
@@ -496,7 +745,10 @@ static class Program
                 src.Seek(headerSize + off, SeekOrigin.Begin);
                 ReadExact(src, buf, 0, sz);
                 string txt = Encoding.UTF8.GetString(buf);
-                if (txt.Contains("api.openai.com/v1/audio/transcriptions") || txt.Contains(GroqUrl))
+                if (txt.Contains("api.openai.com/v1/audio/transcriptions")
+                    || txt.Contains(targetUrl)
+                    || txt.Contains(DefaultGroqUrl)
+                    || txt.Contains("const __groqWords ="))
                 {
                     targetName = kv.Key;
                     targetEntry = entry;
@@ -508,12 +760,12 @@ static class Program
             if (targetEntry == null)
                 throw new Exception("Could not locate CloudSpeech bundle inside apps/server/dist.");
 
-            wasAlreadyGroq = targetText.Contains(GroqUrl);
+            wasAlreadyPatched = !targetText.Contains("api.openai.com/v1/audio/transcriptions");
             bool changed;
-            string patchedText = PatchCloudSpeechSource(targetText, model, out changed);
+            string patchedText = PatchCloudSpeechSource(targetText, targetUrl, model, out changed);
             if (!changed)
             {
-                Log(logPath, cliMode, "server.asar (" + targetName + ") is already patched for Groq (" + model + ").");
+                Log(logPath, cliMode, "server.asar (" + targetName + ") is already patched for " + targetUrl + " (" + model + ").");
                 return;
             }
 
@@ -568,23 +820,23 @@ static class Program
                         throw new Exception("Verification failed: SHA-256 mismatch in rewritten ASAR.");
                 }
             }
-            if (!Encoding.UTF8.GetString(vBuf).Contains(GroqUrl))
-                throw new Exception("Verification failed: Groq URL missing in rewritten ASAR.");
+            if (!Encoding.UTF8.GetString(vBuf).Contains(targetUrl))
+                throw new Exception("Verification failed: transcription URL missing in rewritten ASAR.");
         }
 
         if (dryRun)
         {
             File.Delete(outPath);
             Log(logPath, cliMode,
-                "DRY RUN PASSED: " + targetName + " patched (" + oldSize + " -> " + newSize + " bytes, verified integrity). Real install untouched.");
+                "DRY RUN PASSED: " + targetName + " patched -> " + targetUrl + " (" + model + ", " + oldSize + " -> " + newSize + " bytes, verified integrity). Real install untouched.");
             return;
         }
 
-        if (!wasAlreadyGroq || !File.Exists(backupPath))
+        if (!wasAlreadyPatched || !File.Exists(backupPath))
             File.Copy(asarPath, backupPath, true);
         File.Delete(asarPath);
         File.Move(outPath, asarPath);
-        Log(logPath, cliMode, "Patched " + targetName + " -> Groq (" + model + "). Backup saved to server.asar.bak.");
+        Log(logPath, cliMode, "Patched " + targetName + " -> " + targetUrl + " (" + model + "). Backup saved to server.asar.bak.");
     }
 
     static string SanitizeFileName(string name)
@@ -593,21 +845,42 @@ static class Program
         return name.Trim();
     }
 
-    static string BuildStateKey(string asarPath, string model, string appAsarPath, string iconPath, string customName, string stateDir)
+    static string BuildStateKey(
+        string asarPath,
+        string targetUrl,
+        string model,
+        bool skipAsar,
+        string appAsarPath,
+        string iconPath,
+        string customName,
+        bool skipIcon,
+        bool skipName,
+        string stateDir)
     {
-        var info = new FileInfo(asarPath);
-        string key = "v6|" + info.Length + "|" + info.LastWriteTimeUtc.Ticks + "|" + model;
-        bool hasAppPatch = (!string.IsNullOrEmpty(iconPath) && File.Exists(iconPath)) || !string.IsNullOrEmpty(customName);
+        string key;
+        if (skipAsar)
+        {
+            key = "v7|skip-asar";
+        }
+        else
+        {
+            var info = new FileInfo(asarPath);
+            key = "v7|" + info.Length + "|" + info.LastWriteTimeUtc.Ticks + "|" + targetUrl + "|" + model;
+        }
+        if (skipIcon) key += "|skip-icon";
+        if (skipName) key += "|skip-name";
+        bool hasAppPatch = (!skipIcon && !string.IsNullOrEmpty(iconPath) && File.Exists(iconPath))
+            || (!skipName && !string.IsNullOrEmpty(customName));
         if (hasAppPatch && File.Exists(appAsarPath))
         {
             var appInfo = new FileInfo(appAsarPath);
             key += "|" + appInfo.Length + "|" + appInfo.LastWriteTimeUtc.Ticks;
-            if (!string.IsNullOrEmpty(iconPath) && File.Exists(iconPath))
+            if (!skipIcon && !string.IsNullOrEmpty(iconPath) && File.Exists(iconPath))
             {
                 var icoInfo = new FileInfo(iconPath);
                 key += "|ico:" + iconPath.ToLowerInvariant() + ":" + icoInfo.Length + ":" + icoInfo.LastWriteTimeUtc.Ticks;
             }
-            if (!string.IsNullOrEmpty(customName))
+            if (!skipName && !string.IsNullOrEmpty(customName))
                 key += "|name:" + customName;
         }
         key += "|sm:" + GetStartMenuSignature(stateDir);
@@ -728,14 +1001,23 @@ static class Program
         catch { return null; }
     }
 
-    static void PatchAppAsar(string appAsarPath, string backupPath, byte[] newIconBytes, string customName, bool dryRun, string logPath, bool cliMode)
+    static void PatchAppAsar(
+        string appAsarPath,
+        string backupPath,
+        byte[] newIconBytes,
+        string customName,
+        bool skipIcon,
+        bool skipName,
+        bool dryRun,
+        string logPath,
+        bool cliMode)
     {
         string outPath = dryRun
             ? Path.Combine(Path.GetTempPath(), "app-patch-dryrun-" + DateTime.UtcNow.Ticks + ".asar")
             : appAsarPath + ".tmp";
 
         var reps = new List<AsarReplacement>();
-        byte[] targetIconBytes = newIconBytes ?? ReadIconFromAsar(backupPath);
+        byte[] targetIconBytes = skipIcon ? null : (newIconBytes ?? ReadIconFromAsar(backupPath));
         string iconActionLabel = newIconBytes != null ? "icon.ico" : "icon.ico (restored default)";
 
         using (var src = new FileStream(appAsarPath, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -743,7 +1025,7 @@ static class Program
             long headerSize;
             var tree = ReadAsarHeader(src, out headerSize);
 
-            if (targetIconBytes != null)
+            if (!skipIcon && targetIconBytes != null)
             {
                 var prodRes = GetFilesDict(tree, "apps", "desktop", "prod-resources");
                 if (prodRes == null || !prodRes.ContainsKey("icon.ico"))
@@ -780,6 +1062,7 @@ static class Program
                 }
             }
 
+            if (!skipName)
             {
                 var distElectron = GetFilesDict(tree, "apps", "desktop", "dist-electron");
                 if (distElectron == null || !distElectron.ContainsKey("main.cjs"))
@@ -1113,6 +1396,11 @@ static class Program
         string exePath,
         string activeIconPath,
         string activeName,
+        string targetUrl,
+        string model,
+        bool skipAsar,
+        bool skipIcon,
+        bool skipName,
         string aumid,
         string logPath,
         bool cliMode)
@@ -1179,10 +1467,7 @@ static class Program
             try { File.Delete(p); } catch { }
         }
 
-        var argParts = new List<string>();
-        if (!string.IsNullOrEmpty(activeIconPath)) argParts.Add("--icon \"" + activeIconPath + "\"");
-        if (!string.IsNullOrEmpty(activeName)) argParts.Add("--name \"" + activeName.Replace("\"", "\\\"") + "\"");
-        string lnkArgs = argParts.Count > 0 ? string.Join(" ", argParts.ToArray()) : null;
+        string lnkArgs = BuildShortcutArgs(targetUrl, model, skipAsar, skipIcon, skipName, activeIconPath, activeName);
         string iconPath = !string.IsNullOrEmpty(activeIconPath)
             ? activeIconPath
             : (File.Exists(exePath) ? exePath : selfExe);
@@ -1198,7 +1483,7 @@ static class Program
         Log(logPath, cliMode, "Synced Start Menu shortcut: " + desiredPath + " (AppUserModelID=" + aumid + ")");
     }
 
-    static void RestoreStartMenuShortcut(string stateDir, string logPath, bool cliMode)
+    static bool RestoreStartMenuShortcut(string stateDir, string logPath, bool cliMode)
     {
         string programs = GetStartMenuProgramsDir();
         string smBackupPath = Path.Combine(stateDir, "startmenu.lnk.bak");
@@ -1232,6 +1517,7 @@ static class Program
 
         if (changed)
             SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
+        return changed;
     }
 
     static string ReadShortcutTarget(string lnkPath)
