@@ -24,12 +24,19 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+
+[assembly: AssemblyTitle("T3Code-Groq")]
+[assembly: AssemblyDescription("On-launch Groq Whisper patcher and launcher for T3 Code")]
+[assembly: AssemblyProduct("T3Code-Groq")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 static class Program
 {
@@ -368,8 +375,8 @@ static class Program
             "    T3Code-Groq.exe --create-shortcut --icon --name \"My Editor\"",
             "",
             "  Custom proxy URL run (full URL or base URL):",
-            "    T3Code-Groq.exe --url https://<your-worker>.<your-subdomain>.workers.dev/openai/v1/audio/transcriptions",
-            "    T3Code-Groq.exe --url https://<your-worker>.<your-subdomain>.workers.dev/openai/v1",
+            "    T3Code-Groq.exe --url https://proxy.example.com/openai/v1/audio/transcriptions",
+            "    T3Code-Groq.exe --url https://proxy.example.com/openai/v1",
             "",
             "  Branding-only run (skip server.asar transcription patch, patch icon/name only):",
             "    T3Code-Groq.exe --skip-asar --icon \"C:\\path\\to\\icon.ico\" --name \"My Editor\""
@@ -381,29 +388,21 @@ static class Program
         if (string.IsNullOrWhiteSpace(rawUrl))
             return DefaultGroqUrl;
 
-        string trimmed = rawUrl.Trim().TrimEnd('/');
-        Uri parsed;
-        if (!Uri.TryCreate(trimmed, UriKind.Absolute, out parsed)
-            || (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps))
-        {
-            throw new ArgumentException("Invalid transcription URL (must be an absolute http:// or https:// URL): " + rawUrl);
-        }
+        string trimmed = rawUrl.Trim();
+        int qIdx = trimmed.IndexOf('?');
+        string basePart = (qIdx >= 0 ? trimmed.Substring(0, qIdx) : trimmed).TrimEnd('/');
+        string queryPart = qIdx >= 0 ? trimmed.Substring(qIdx) : "";
 
-        if (string.IsNullOrEmpty(parsed.Query))
-        {
-            if (!trimmed.EndsWith("/audio/transcriptions", StringComparison.OrdinalIgnoreCase))
-                trimmed += "/audio/transcriptions";
-            return trimmed;
-        }
+        bool isHttps = basePart.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+        bool isHttp = basePart.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
+        int schemeLen = isHttps ? 8 : (isHttp ? 7 : 0);
+        if (schemeLen == 0 || basePart.Length <= schemeLen)
+            throw new ArgumentException("Invalid transcription URL (must start with http:// or https://): " + rawUrl);
 
-        string pathNoTrailing = parsed.AbsolutePath.TrimEnd('/');
-        if (!pathNoTrailing.EndsWith("/audio/transcriptions", StringComparison.OrdinalIgnoreCase))
-        {
-            var builder = new UriBuilder(parsed);
-            builder.Path = pathNoTrailing + "/audio/transcriptions";
-            return builder.Uri.AbsoluteUri;
-        }
-        return trimmed;
+        if (!basePart.EndsWith("/audio/transcriptions", StringComparison.OrdinalIgnoreCase))
+            basePart += "/audio/transcriptions";
+
+        return basePart + queryPart;
     }
 
     static string BuildShortcutArgs(
@@ -618,10 +617,7 @@ static class Program
             changed = true;
             return patchedEndpointRe.Replace(
                 text,
-                delegate(Match match)
-                {
-                    return match.Groups[1].Value + targetUrl + match.Groups[3].Value + model + match.Groups[5].Value;
-                },
+                "$1" + targetUrl.Replace("$", "$$") + "$3" + model.Replace("$", "$$") + "$5",
                 1);
         }
 
@@ -634,10 +630,7 @@ static class Program
             throw new Exception("Patch failed: could not match OpenAI endpoint/model block.");
         patched = endpointRe.Replace(
             patched,
-            delegate(Match match)
-            {
-                return match.Groups[1].Value + "\"" + targetUrl + "\"" + match.Groups[2].Value + "\"" + model + "\"" + match.Groups[3].Value;
-            },
+            "$1\"" + targetUrl.Replace("$", "$$") + "\"$2\"" + model.Replace("$", "$$") + "\"$3",
             1);
 
         // 2. Language field (`languages[]` -> `language`)
