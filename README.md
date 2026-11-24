@@ -10,7 +10,7 @@ Zero external dependencies — compiles on any Windows 10/11 machine using the b
 - **Custom Proxy / Endpoint URL:** Override the transcription endpoint with `--url` / `--groq-url` (or `T3CODE_GROQ_URL`), e.g. for a Cloudflare Worker proxy. Trailing slashes are trimmed and `/audio/transcriptions` is appended automatically when a base URL is provided. Arbitrary-length URLs are handled safely by rewriting the ASAR header, shifting subsequent entry offsets, and recomputing SHA-256 integrity hashes.
 - **Branding-Only Mode (`--skip-asar`):** Skip `server.asar` transcription patching completely when you only want custom icon and/or app name overrides without touching voice transcription.
 - **Automatic Update Survival:** Uses a `<20ms` fast-path state cache (`%LOCALAPPDATA%\T3Code-Groq\state.txt`) keyed on `server.asar`, `app.asar`, endpoint URL, model, branding overrides, and Start Menu shortcuts. Whenever T3 Code auto-updates, the next launch automatically re-patches and re-syncs everything.
-- **Merged Taskbar & Start Menu Shortcuts:** `--create-shortcut` creates a Desktop shortcut and syncs the Start Menu shortcut with T3 Code's `AppUserModelID`, so pinning to Start or Taskbar merges cleanly with the running T3 Code window.
+- **Merged Taskbar & Start Menu Shortcuts:** `--create-shortcut` creates a Desktop shortcut and syncs the Start Menu shortcut with T3 Code's `AppUserModelID` and `ToastActivatorCLSID`, so pinning to Start or Taskbar merges cleanly with the running T3 Code window and Windows toast notifications do not overwrite the Start Menu shortcut.
 - **Optional Icon & Name Overrides:** `--icon` and `--name` override the Desktop shortcut, Start Menu / Pin to Start entry, Taskbar button, and Alt+Tab / window icon and title. Omitting them keeps T3 Code's defaults.
 - **Safe Backups & Restore:** Automatically backs up `server.asar`, `app.asar`, and the original Start Menu shortcut before patching. `--dry-run` tests patching on a temp copy without touching your install; `--restore` reverts everything.
 
@@ -104,5 +104,5 @@ No SDK installation required — uses Windows' built-in C# compiler:
 All state, backups, and logs live in `%LOCALAPPDATA%\T3Code-Groq\`:
 - `state.txt` — fast-path launch cache
 - `patcher.log` — patching and sync log
-- `icon.txt`, `name.txt`, `aumid.txt` — saved overrides and detected `AppUserModelID`
+- `icon.txt`, `name.txt`, `aumid.txt`, `toast-clsid.txt` — saved overrides, detected `AppUserModelID`, and preserved `ToastActivatorCLSID`
 - `startmenu.lnk.bak` — backup of the original Start Menu shortcut

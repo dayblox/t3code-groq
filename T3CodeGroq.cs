@@ -31,12 +31,13 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 [assembly: AssemblyTitle("T3Code-Groq")]
 [assembly: AssemblyDescription("On-launch Groq Whisper patcher and launcher for T3 Code")]
 [assembly: AssemblyProduct("T3Code-Groq")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 static class Program
 {
@@ -149,6 +150,8 @@ static class Program
                 string iconPath = iconOpt ?? (File.Exists(exePath) ? exePath : selfExe);
                 string aumid = GetOpt(args, "--aumid", DetectT3Aumid(stateDir) ?? DefaultAumid);
                 SaveAumid(stateDir, aumid);
+                Guid? toastClsid = DetectToastActivatorClsid(stateDir, exePath);
+                SaveToastActivatorClsid(stateDir, toastClsid);
                 bool customWindowIcon = !string.IsNullOrEmpty(iconOpt)
                     && !string.Equals(Path.GetFullPath(iconOpt), Path.GetFullPath(selfExe), StringComparison.OrdinalIgnoreCase)
                     && (!File.Exists(exePath) || !string.Equals(Path.GetFullPath(iconOpt), Path.GetFullPath(exePath), StringComparison.OrdinalIgnoreCase));
@@ -163,7 +166,7 @@ static class Program
                     !string.IsNullOrEmpty(nameOpt) ? nameOpt : null);
                 string desc = !string.IsNullOrEmpty(nameOpt) ? nameOpt : defaultAppName;
 
-                CreateMergedShortcut(shortcutPath, selfExe, lnkArgs, iconPath, aumid, desc);
+                CreateMergedShortcut(shortcutPath, selfExe, lnkArgs, iconPath, aumid, toastClsid, desc);
                 if (!skipIcon)
                 {
                     if (customWindowIcon)
@@ -1296,6 +1299,9 @@ static class Program
     static readonly PropertyKey PKEY_AppUserModel_ID =
         new PropertyKey(new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), 5);
 
+    static readonly PropertyKey PKEY_AppUserModel_ToastActivatorCLSID =
+        new PropertyKey(new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), 26);
+
     static readonly string[] StockStartMenuNames = { "T3 Code (Nightly).lnk", "T3 Code (Beta).lnk", "T3 Code.lnk" };
 
     const int SHCNE_ASSOCCHANGED = 0x08000000;
@@ -1320,6 +1326,107 @@ static class Program
             File.WriteAllText(Path.Combine(stateDir, "aumid.txt"), aumid);
         }
         catch { }
+    }
+
+    static void SaveToastActivatorClsid(string stateDir, Guid? clsid)
+    {
+        if (!clsid.HasValue || clsid.Value == Guid.Empty) return;
+        try
+        {
+            Directory.CreateDirectory(stateDir);
+            File.WriteAllText(Path.Combine(stateDir, "toast-clsid.txt"), clsid.Value.ToString("B"));
+        }
+        catch { }
+    }
+
+    static bool IsToastClsidRegistered(Guid clsid, string exePath)
+    {
+        try
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Classes\CLSID\" + clsid.ToString("B") + @"\LocalServer32"))
+            {
+                if (key == null) return false;
+                string val = key.GetValue(null) as string;
+                if (string.IsNullOrWhiteSpace(val)) return false;
+                if (string.IsNullOrEmpty(exePath)) return true;
+                string cleaned = val.Trim().Trim('"');
+                return string.Equals(cleaned, exePath, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        catch { return false; }
+    }
+
+    static Guid? DetectToastActivatorClsid(string stateDir, string exePath)
+    {
+        string programs = GetStartMenuProgramsDir();
+        Guid? fallback = null;
+
+        // 1. Check existing Start Menu shortcuts (stock + currently managed)
+        var candidates = new List<string>(StockStartMenuNames);
+        string managedFile = Path.Combine(stateDir, "startmenu-managed.txt");
+        if (File.Exists(managedFile))
+        {
+            string m = File.ReadAllText(managedFile).Trim();
+            if (!string.IsNullOrEmpty(m)) candidates.Add(m);
+        }
+        foreach (string name in candidates)
+        {
+            string p = Path.Combine(programs, name);
+            if (!File.Exists(p)) continue;
+            Guid? id = ReadShortcutToastActivatorClsid(p);
+            if (id.HasValue && id.Value != Guid.Empty)
+            {
+                if (IsToastClsidRegistered(id.Value, exePath)) return id;
+                if (!fallback.HasValue) fallback = id;
+            }
+        }
+
+        // 2. Check saved toast-clsid.txt
+        string savedPath = Path.Combine(stateDir, "toast-clsid.txt");
+        if (File.Exists(savedPath))
+        {
+            Guid parsed;
+            if (Guid.TryParse(File.ReadAllText(savedPath).Trim(), out parsed) && parsed != Guid.Empty)
+            {
+                if (IsToastClsidRegistered(parsed, exePath)) return parsed;
+                if (!fallback.HasValue) fallback = parsed;
+            }
+        }
+
+        // 3. Check Start Menu backup
+        string smBackup = Path.Combine(stateDir, "startmenu.lnk.bak");
+        if (File.Exists(smBackup))
+        {
+            Guid? id = ReadShortcutToastActivatorClsid(smBackup);
+            if (id.HasValue && id.Value != Guid.Empty)
+            {
+                if (IsToastClsidRegistered(id.Value, exePath)) return id;
+                if (!fallback.HasValue) fallback = id;
+            }
+        }
+
+        // 4. Scan HKCU\Software\Classes\CLSID\*\LocalServer32 for T3 Code's registered ToastActivatorCLSID
+        if (!string.IsNullOrEmpty(exePath))
+        {
+            try
+            {
+                using (var clsidRoot = Registry.CurrentUser.OpenSubKey(@"Software\Classes\CLSID"))
+                {
+                    if (clsidRoot != null)
+                    {
+                        foreach (string sub in clsidRoot.GetSubKeyNames())
+                        {
+                            Guid parsed;
+                            if (!Guid.TryParse(sub, out parsed) || parsed == Guid.Empty) continue;
+                            if (IsToastClsidRegistered(parsed, exePath)) return parsed;
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        return fallback;
     }
 
     static string DetectT3Aumid(string stateDir)
@@ -1423,9 +1530,14 @@ static class Program
                 }
                 string detectedId = ReadShortcutAumid(p);
                 if (!string.IsNullOrEmpty(detectedId)) SaveAumid(stateDir, detectedId);
+                Guid? detectedToast = ReadShortcutToastActivatorClsid(p);
+                if (detectedToast.HasValue) SaveToastActivatorClsid(stateDir, detectedToast);
                 break;
             }
         }
+
+        Guid? toastClsid = DetectToastActivatorClsid(stateDir, exePath);
+        SaveToastActivatorClsid(stateDir, toastClsid);
 
         string origName = File.Exists(smOrigNamePath) ? File.ReadAllText(smOrigNamePath).Trim() : "T3 Code (Nightly).lnk";
         if (string.IsNullOrEmpty(origName)) origName = "T3 Code (Nightly).lnk";
@@ -1468,12 +1580,16 @@ static class Program
             ? activeName
             : Path.GetFileNameWithoutExtension(desiredFileName);
 
-        CreateMergedShortcut(desiredPath, selfExe, lnkArgs, iconPath, aumid, desc);
+        CreateMergedShortcut(desiredPath, selfExe, lnkArgs, iconPath, aumid, toastClsid, desc);
         Directory.CreateDirectory(stateDir);
         File.WriteAllText(smManagedPath, desiredFileName);
         SaveAumid(stateDir, aumid);
+        SaveToastActivatorClsid(stateDir, toastClsid);
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
-        Log(logPath, cliMode, "Synced Start Menu shortcut: " + desiredPath + " (AppUserModelID=" + aumid + ")");
+        Log(logPath, cliMode, "Synced Start Menu shortcut: " + desiredPath
+            + " (AppUserModelID=" + aumid
+            + (toastClsid.HasValue ? ", ToastActivatorCLSID=" + toastClsid.Value.ToString("B") : "")
+            + ")");
     }
 
     static bool RestoreStartMenuShortcut(string stateDir, string logPath, bool cliMode)
@@ -1542,7 +1658,23 @@ static class Program
         catch { return null; }
     }
 
-    static void CreateMergedShortcut(string shortcutPath, string targetExe, string arguments, string iconPath, string aumid, string description)
+    static Guid? ReadShortcutToastActivatorClsid(string lnkPath)
+    {
+        try
+        {
+            var link = (IShellLinkW)new CShellLink();
+            ((IPersistFile)link).Load(lnkPath, 0);
+            var store = (IPropertyStore)link;
+            PropertyKey key = PKEY_AppUserModel_ToastActivatorCLSID;
+            PropVariant val;
+            store.GetValue(ref key, out val);
+            try { return val.GetGuid(); }
+            finally { val.Clear(); }
+        }
+        catch { return null; }
+    }
+
+    static void CreateMergedShortcut(string shortcutPath, string targetExe, string arguments, string iconPath, string aumid, Guid? toastClsid, string description)
     {
         string dir = Path.GetDirectoryName(shortcutPath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
@@ -1560,9 +1692,21 @@ static class Program
         try
         {
             store.SetValue(ref key, ref val);
-            store.Commit();
         }
         finally { val.Clear(); }
+
+        if (toastClsid.HasValue && toastClsid.Value != Guid.Empty)
+        {
+            PropertyKey toastKey = PKEY_AppUserModel_ToastActivatorCLSID;
+            var toastVal = PropVariant.FromGuid(toastClsid.Value);
+            try
+            {
+                store.SetValue(ref toastKey, ref toastVal);
+            }
+            finally { toastVal.Clear(); }
+        }
+
+        store.Commit();
 
         ((IPersistFile)link).Save(shortcutPath, true);
     }
@@ -1619,6 +1763,7 @@ static class Program
         [FieldOffset(8)] public IntPtr ptr;
 
         const ushort VT_LPWSTR = 31;
+        const ushort VT_CLSID = 72;
 
         [DllImport("ole32.dll")]
         static extern int PropVariantClear(ref PropVariant pvar);
@@ -1628,9 +1773,25 @@ static class Program
             return new PropVariant { vt = VT_LPWSTR, ptr = Marshal.StringToCoTaskMemUni(s) };
         }
 
+        public static PropVariant FromGuid(Guid g)
+        {
+            byte[] bytes = g.ToByteArray();
+            IntPtr mem = Marshal.AllocCoTaskMem(bytes.Length);
+            Marshal.Copy(bytes, 0, mem, bytes.Length);
+            return new PropVariant { vt = VT_CLSID, ptr = mem };
+        }
+
         public string GetString()
         {
             return (vt == VT_LPWSTR && ptr != IntPtr.Zero) ? Marshal.PtrToStringUni(ptr) : null;
+        }
+
+        public Guid? GetGuid()
+        {
+            if (vt != VT_CLSID || ptr == IntPtr.Zero) return null;
+            byte[] bytes = new byte[16];
+            Marshal.Copy(ptr, bytes, 0, 16);
+            return new Guid(bytes);
         }
 
         public void Clear() { PropVariantClear(ref this); }
