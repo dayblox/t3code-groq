@@ -36,8 +36,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("T3Code-Groq")]
 [assembly: AssemblyDescription("On-launch Groq Whisper patcher and launcher for T3 Code")]
 [assembly: AssemblyProduct("T3Code-Groq")]
-[assembly: AssemblyVersion("1.1.1.0")]
-[assembly: AssemblyFileVersion("1.1.1.0")]
+[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyFileVersion("1.1.2.0")]
 
 static class Program
 {
@@ -148,7 +148,7 @@ static class Program
                         Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
                         defaultLnkName));
                 string iconPath = iconOpt ?? (File.Exists(exePath) ? exePath : selfExe);
-                string aumid = GetOpt(args, "--aumid", DetectT3Aumid(stateDir) ?? DefaultAumid);
+                string aumid = ResolveAumid(stateDir, GetOpt(args, "--aumid", null));
                 SaveAumid(stateDir, aumid);
                 Guid? toastClsid = DetectToastActivatorClsid(stateDir, exePath);
                 SaveToastActivatorClsid(stateDir, toastClsid);
@@ -283,11 +283,13 @@ static class Program
                 return 0;
             }
 
-            // Fast path (<20ms): unchanged size + LastWriteTimeUtc + url + model + icon + name + Start Menu => launch immediately
-            string expectedState = BuildStateKey(asarPath, targetUrl, model, skipAsar, appAsarPath, activeIconPath, activeName, skipIcon, skipName, stateDir);
+            string activeAumid = ResolveAumid(stateDir, GetOpt(args, "--aumid", null));
+
+            // Fast path (<20ms): unchanged size + LastWriteTimeUtc + url + model + icon + name + aumid + Start Menu => launch immediately
+            string expectedState = BuildStateKey(asarPath, targetUrl, model, skipAsar, appAsarPath, activeIconPath, activeName, skipIcon, skipName, activeAumid, stateDir);
             if (File.Exists(statePath) && File.ReadAllText(statePath).Trim() == expectedState)
             {
-                if (!patchOnly) Launch(exePath);
+                if (!patchOnly) Launch(exePath, activeAumid);
                 return 0;
             }
 
@@ -307,7 +309,6 @@ static class Program
             }
 
             string currentSelfExe = Process.GetCurrentProcess().MainModule.FileName;
-            string activeAumid = GetOpt(args, "--aumid", DetectT3Aumid(stateDir) ?? DefaultAumid);
             SyncStartMenuShortcut(
                 stateDir,
                 currentSelfExe,
@@ -326,9 +327,9 @@ static class Program
             Directory.CreateDirectory(stateDir);
             File.WriteAllText(
                 statePath,
-                BuildStateKey(asarPath, targetUrl, model, skipAsar, appAsarPath, activeIconPath, activeName, skipIcon, skipName, stateDir));
+                BuildStateKey(asarPath, targetUrl, model, skipAsar, appAsarPath, activeIconPath, activeName, skipIcon, skipName, activeAumid, stateDir));
 
-            if (!patchOnly) Launch(exePath);
+            if (!patchOnly) Launch(exePath, activeAumid);
             return 0;
         }
         catch (Exception ex)
@@ -525,16 +526,19 @@ static class Program
         return Path.Combine(dir, "T3 Code (Nightly).exe");
     }
 
-    static void Launch(string exePath)
+    static void Launch(string exePath, string aumid)
     {
         if (!File.Exists(exePath))
             throw new FileNotFoundException("T3 Code executable not found at: " + exePath);
-        Process.Start(new ProcessStartInfo
+        var psi = new ProcessStartInfo
         {
             FileName = exePath,
             WorkingDirectory = Path.GetDirectoryName(exePath),
-            UseShellExecute = true
-        });
+            UseShellExecute = false
+        };
+        if (!string.IsNullOrEmpty(aumid))
+            psi.EnvironmentVariables["T3CODE_DESKTOP_APP_USER_MODEL_ID"] = aumid;
+        Process.Start(psi);
     }
 
     static void Log(string logPath, bool toConsole, string message)
@@ -851,17 +855,18 @@ static class Program
         string customName,
         bool skipIcon,
         bool skipName,
+        string aumid,
         string stateDir)
     {
         string key;
         if (skipAsar)
         {
-            key = "v7|skip-asar";
+            key = "v8|skip-asar";
         }
         else
         {
             var info = new FileInfo(asarPath);
-            key = "v7|" + info.Length + "|" + info.LastWriteTimeUtc.Ticks + "|" + targetUrl + "|" + model;
+            key = "v8|" + info.Length + "|" + info.LastWriteTimeUtc.Ticks + "|" + targetUrl + "|" + model;
         }
         if (skipIcon) key += "|skip-icon";
         if (skipName) key += "|skip-name";
@@ -879,6 +884,7 @@ static class Program
             if (!skipName && !string.IsNullOrEmpty(customName))
                 key += "|name:" + customName;
         }
+        key += "|aumid:" + (aumid ?? "");
         key += "|sm:" + GetStartMenuSignature(stateDir);
         return key;
     }
@@ -1429,6 +1435,16 @@ static class Program
         return fallback;
     }
 
+    static string ResolveAumid(string stateDir, string explicitAumid)
+    {
+        if (!string.IsNullOrWhiteSpace(explicitAumid))
+            return explicitAumid.Trim();
+        string baseAumid = DetectT3Aumid(stateDir) ?? DefaultAumid;
+        if (!baseAumid.EndsWith(".groq", StringComparison.OrdinalIgnoreCase))
+            baseAumid += ".groq";
+        return baseAumid;
+    }
+
     static string DetectT3Aumid(string stateDir)
     {
         string programs = GetStartMenuProgramsDir();
@@ -1528,8 +1544,6 @@ static class Program
                     File.Copy(p, smBackupPath, true);
                     File.WriteAllText(smOrigNamePath, stockName);
                 }
-                string detectedId = ReadShortcutAumid(p);
-                if (!string.IsNullOrEmpty(detectedId)) SaveAumid(stateDir, detectedId);
                 Guid? detectedToast = ReadShortcutToastActivatorClsid(p);
                 if (detectedToast.HasValue) SaveToastActivatorClsid(stateDir, detectedToast);
                 break;
