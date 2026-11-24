@@ -36,8 +36,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("T3Code-Groq")]
 [assembly: AssemblyDescription("On-launch Groq Whisper patcher and launcher for T3 Code")]
 [assembly: AssemblyProduct("T3Code-Groq")]
-[assembly: AssemblyVersion("1.1.2.0")]
-[assembly: AssemblyFileVersion("1.1.2.0")]
+[assembly: AssemblyVersion("1.1.3.0")]
+[assembly: AssemblyFileVersion("1.1.3.0")]
 
 static class Program
 {
@@ -1576,14 +1576,21 @@ static class Program
             }
         }
 
-        // Remove any stock T3 Code Start Menu shortcut with a different name so Start Menu doesn't
-        // resolve the shared AppUserModelID back to "T3 Code (Nightly)"
+        // Remove any stock T3 Code Start Menu shortcut with a different name (except origName,
+        // which we keep as a hidden decoy pointing to selfExe below so Electron's Windows toast
+        // notification handler does not recreate it pointing directly to T3 Code.exe).
         foreach (string stockName in StockStartMenuNames)
         {
             if (string.Equals(stockName, desiredFileName, StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.Equals(stockName, origName, StringComparison.OrdinalIgnoreCase)) continue;
             string p = Path.Combine(programs, stockName);
             if (!File.Exists(p)) continue;
-            try { File.Delete(p); } catch { }
+            try
+            {
+                File.SetAttributes(p, FileAttributes.Normal);
+                File.Delete(p);
+            }
+            catch { }
         }
 
         string lnkArgs = BuildShortcutArgs(targetUrl, model, skipAsar, skipIcon, skipName, activeIconPath, activeName);
@@ -1594,7 +1601,27 @@ static class Program
             ? activeName
             : Path.GetFileNameWithoutExtension(desiredFileName);
 
+        if (File.Exists(desiredPath))
+        {
+            try { File.SetAttributes(desiredPath, FileAttributes.Normal); } catch { }
+        }
         CreateMergedShortcut(desiredPath, selfExe, lnkArgs, iconPath, aumid, toastClsid, desc);
+
+        // If a custom name is used (desiredFileName != origName), keep origName as a hidden
+        // shortcut with the same target, AUMID, and ToastActivatorCLSID so Electron's toast
+        // notification check finds it and never recreates a stock shortcut to T3 Code.exe.
+        if (!string.Equals(origName, desiredFileName, StringComparison.OrdinalIgnoreCase))
+        {
+            string origPath = Path.Combine(programs, origName);
+            try
+            {
+                if (File.Exists(origPath))
+                    File.SetAttributes(origPath, FileAttributes.Normal);
+                CreateMergedShortcut(origPath, selfExe, lnkArgs, iconPath, aumid, toastClsid, desc);
+                File.SetAttributes(origPath, File.GetAttributes(origPath) | FileAttributes.Hidden);
+            }
+            catch { }
+        }
         Directory.CreateDirectory(stateDir);
         File.WriteAllText(smManagedPath, desiredFileName);
         SaveAumid(stateDir, aumid);
@@ -1633,7 +1660,12 @@ static class Program
         if (File.Exists(smBackupPath) && !string.IsNullOrEmpty(origName) && Directory.Exists(programs))
         {
             string dest = Path.Combine(programs, origName);
+            if (File.Exists(dest))
+            {
+                try { File.SetAttributes(dest, FileAttributes.Normal); } catch { }
+            }
             File.Copy(smBackupPath, dest, true);
+            try { File.SetAttributes(dest, FileAttributes.Normal); } catch { }
             changed = true;
             Log(logPath, cliMode, "Restored original Start Menu shortcut: " + dest);
         }
